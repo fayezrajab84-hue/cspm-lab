@@ -1,0 +1,256 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "winServerName": {
+            "type": "string",
+            "maxLength": 15,
+            "metadata": {
+                "description": "Name for the Windows Server Virtual Machine. Windows computer names are limited to 15 characters."
+            }
+        },
+        "azureWinImageVersion": {
+            "type": "string",
+            "defaultValue": "latest",
+            "metadata": {
+                "description": "Version of the Windows Server image to deploy. Use 'latest' for the most recent fully patched image, or specify an older version string (e.g., '17763.5206.240105') to intentionally deploy a version with known vulnerabilities for lab/testing purposes. Note: older versions are not always available in every region."
+            }
+        },
+        "adminUsername": {
+            "type": "string",
+            "metadata": {
+                "description": "User name for the Virtual Machine."
+            }
+        },
+        "adminPassword": {
+            "type": "securestring",
+            "minLength": 12,
+            "metadata": {
+                "description": "Password for the Virtual Machine. Must meet Windows complexity requirements (12+ chars, mix of upper/lower/digit/special)."
+            }
+        },
+        "virtualNetworkName": {
+            "type": "string",
+            "defaultValue": "asclab-vnet",
+            "metadata": {
+                "description": "Name of the existing vNet used in the previous deployment. Open the Resource Group hosting the Lab environment and copy the vNet Name."
+            }
+        },
+        "storageAccountName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the existing Storage Account used in the previous deployment. Open the Resource Group hosting the Lab environment and copy the SA Name."
+            }
+        },
+        "keyVaultName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the existing Key Vault used in the previous deployment. Open the Resource Group hosting the Lab environment and copy the KV Name."
+            }
+        },
+        "sqlServerName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the existing Azure SQL Server used in the previous deployment. Open the Resource Group hosting the Lab environment and copy the SQL Server Name."
+            }
+        },
+        "roleNameGuid": {
+            "type": "string",
+            "defaultValue": "[newGuid()]",
+            "metadata": {
+                "description": "A new GUID used to identify the role assignment."
+            }
+        },
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Location for all resources."
+            }
+        }
+    },
+    "variables": {
+        "vmName": "[parameters('winServerName')]",
+        "vmSize": "Standard_D2s_v3",
+        "publicIPAddressName": "[concat(variables('vmName'), '-pip')]",
+        "publicIPAddressSku": "Standard",
+        "publicIPAllocationMethod": "Static",
+        "nicName": "[concat(variables('vmName'), '-nic')]",
+        "subnetName": "Default",
+        "osType": {
+            "publisher": "MicrosoftWindowsServer",
+            "offer": "WindowsServer",
+            "sku": "2019-datacenter-gensecond",
+            "version": "[parameters('azureWinImageVersion')]",
+            "osDiskName": "[concat(variables('vmName'), '-osdisk')]",
+            "dataDiskName": "[concat(variables('vmName'), '-datadisk')]"
+        },
+        "kyv-role-GUID": "[guid(parameters('roleNameGuid'), 'key')]",
+        "sql-role-GUID": "[guid(parameters('roleNameGuid'), 'sql')]",
+        "sac-role-GUID": "[guid(parameters('roleNameGuid'), 'sac')]",
+        "keyVaultSecretsUserRoleId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6')]",
+        "sqlDbContributorRoleId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/9b7fa17d-e63e-47b0-bb0a-15c516ac86ec')]",
+        "storageBlobDataContributorRoleId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe')]"
+    },
+    "resources": [
+        {
+            "comments": "Standard SKU public IP. Standard SKU requires Static allocation.",
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2023-09-01",
+            "name": "[variables('publicIPAddressName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "[variables('publicIPAddressSku')]"
+            },
+            "properties": {
+                "publicIPAllocationMethod": "[variables('publicIPAllocationMethod')]",
+                "dnsSettings": {
+                    "domainNameLabel": "[toLower(variables('vmName'))]"
+                }
+            }
+        },
+        {
+            "comments": "Network interface. Private IP remains Dynamic (DHCP from subnet).",
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2023-09-01",
+            "name": "[variables('nicName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+            ],
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipconfig1",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "publicIPAddress": {
+                                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))]"
+                            },
+                            "subnet": {
+                                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('virtualNetworkName'), variables('subnetName'))]"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "comments": "Windows Server VM with system-assigned managed identity. Auto-updates disabled intentionally (lab scenario).",
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2023-03-01",
+            "name": "[variables('vmName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+            ],
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "[variables('vmSize')]"
+                },
+                "osProfile": {
+                    "computerName": "[variables('vmName')]",
+                    "adminUsername": "[parameters('adminUsername')]",
+                    "adminPassword": "[parameters('adminPassword')]",
+                    "windowsConfiguration": {
+                        "enableAutomaticUpdates": false,
+                        "provisionVMAgent": true,
+                        "patchSettings": {
+                            "enableHotpatching": false,
+                            "assessmentMode": "ImageDefault",
+                            "patchMode": "Manual"
+                        }
+                    }
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "[variables('osType').publisher]",
+                        "offer": "[variables('osType').offer]",
+                        "sku": "[variables('osType').sku]",
+                        "version": "[variables('osType').version]"
+                    },
+                    "osDisk": {
+                        "createOption": "FromImage",
+                        "name": "[variables('osType').osDiskName]",
+                        "managedDisk": {
+                            "storageAccountType": "StandardSSD_LRS"
+                        }
+                    },
+                    "dataDisks": [
+                        {
+                            "diskSizeGB": 1023,
+                            "lun": 0,
+                            "createOption": "Empty",
+                            "name": "[variables('osType').dataDiskName]"
+                        }
+                    ]
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('nicName'))]"
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "comments": "Assign Key Vault Secrets User to VM managed identity.",
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[variables('kyv-role-GUID')]",
+            "scope": "[concat('Microsoft.KeyVault/vaults', '/', parameters('keyVaultName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[variables('keyVaultSecretsUserRoleId')]",
+                "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('vmName')), '2023-03-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+            }
+        },
+        {
+            "comments": "Assign SQL DB Contributor to VM managed identity.",
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[variables('sql-role-GUID')]",
+            "scope": "[concat('Microsoft.Sql/servers/', parameters('sqlServerName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[variables('sqlDbContributorRoleId')]",
+                "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('vmName')), '2023-03-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+            }
+        },
+        {
+            "comments": "Assign Storage Blob Data Contributor to VM managed identity.",
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[variables('sac-role-GUID')]",
+            "scope": "[concat('Microsoft.Storage/storageAccounts/', parameters('storageAccountName'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[variables('storageBlobDataContributorRoleId')]",
+                "principalId": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('vmName')), '2023-03-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+            }
+        }
+    ],
+    "outputs": {
+        "vmPrincipalId": {
+            "type": "string",
+            "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', variables('vmName')), '2023-03-01', 'full').identity.principalId]"
+        },
+        "publicIPFqdn": {
+            "type": "string",
+            "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', variables('publicIPAddressName'))).dnsSettings.fqdn]"
+        }
+    }
+}
